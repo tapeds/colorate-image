@@ -3,6 +3,8 @@ import numpy as np
 from sklearn.cluster import KMeans
 from constraint import Problem
 import random
+import os
+from matplotlib.colors import LinearSegmentedColormap
 
 def convert_to_grayscale(image):
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -30,7 +32,6 @@ def create_coloring_csp(labels, color_count):
     for segment in segments:
         problem.addVariable(segment, range(color_count))
 
-    # Custom coloring constraints
     for y in range(height):
         for x in range(width):
             if x + 1 < width and labels[y, x] != labels[y, x + 1]:
@@ -40,14 +41,25 @@ def create_coloring_csp(labels, color_count):
 
     return problem.getSolution()
 
-def generate_colors(color_count):
+def generate_random_color():
+    # Generate a random color using HSV model for more variety
+    hue = np.random.rand() * 360  # Hue value between 0-360
+    saturation = 0.5 + np.random.rand() * 0.5  # Saturation between 0.5-1.0 for more vivid colors
+    value = 0.5 + np.random.rand() * 0.5  # Value between 0.5-1.0 to avoid very dark colors
+    return cv2.cvtColor(np.uint8([[[hue, saturation * 255, value * 255]]]), cv2.COLOR_HSV2BGR)[0][0]
+
+def generate_gradient_colors(color_count):
     colors = []
-    while len(colors) < color_count:
-        new_color = tuple(random.randint(0, 255) for _ in range(3))
-        colors.append(new_color)
+    for _ in range(color_count):
+        start_color = generate_random_color()
+        end_color = generate_random_color()
+        colors.append((start_color, end_color))
     return colors
 
-def apply_color_to_solution(image, labels, solution, colors):
+def interpolate_color(start_color, end_color, fraction):
+    return start_color + (end_color - start_color) * fraction
+
+def apply_gradient_color_to_solution(image, labels, solution, colors):
     if not solution:
         return None
 
@@ -55,23 +67,44 @@ def apply_color_to_solution(image, labels, solution, colors):
     for y in range(image.shape[0]):
         for x in range(image.shape[1]):
             color_index = solution[labels[y, x]]
-            result_image[y, x] = colors[color_index]
+            start_color, end_color = colors[color_index]
+            fraction = np.mean([y / image.shape[0], x / image.shape[1]])
+            color = interpolate_color(start_color, end_color, fraction)
+            result_image[y, x] = np.clip(color, 0, 255).astype(np.uint8)
 
     return result_image
 
+def detect_faces(image):
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+    return faces
+
+def mark_face_regions(labels, faces, special_label):
+    for (x, y, w, h) in faces:
+        labels[y:y+h, x:x+w] = special_label
+    return labels
+
 def process_image(image_path):
-    img = cv2.imread(image_path)
-    if img is None:
+    if not os.path.exists(image_path):
         raise FileNotFoundError(f"File at {image_path} not found or cannot be read.")
+
+    img = cv2.imread(image_path)
+    faces = detect_faces(img)
 
     grayscale_img = convert_to_grayscale(img)
     blurred_img = apply_gaussian_blur(grayscale_img)
     resized_img = resize_image(blurred_img)
-    labels = k_means_segmentation(resized_img, K=8)  # Increased number of segments
-    color_count = 15  # Increased number of colors for more complexity
-    colors = generate_colors(color_count)
+    labels = k_means_segmentation(resized_img, K=8)
+
+    # Tandai area wajah dengan label khusus
+    special_label = 999  # Label unik untuk area wajah
+    labels = mark_face_regions(labels, faces, special_label)
+
+    color_count = 15
+    colors = generate_gradient_colors(color_count)
     solution = create_coloring_csp(labels, color_count)
-    colored_img = apply_color_to_solution(resized_img, labels, solution, colors)
+    colored_img = apply_gradient_color_to_solution(resized_img, labels, solution, colors)
 
     if colored_img is not None:
         result_img = cv2.resize(colored_img, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
